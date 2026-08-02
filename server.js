@@ -118,6 +118,25 @@ function makeId(link) {
 
 let cachedArticles = [];
 let lastRefreshed = null;
+let refreshInProgress = null;
+
+// Because free hosting sleeps when idle, a fixed timer alone isn't
+// reliable — it doesn't run while asleep. So instead: whenever a
+// request comes in and the cache is older than 15 minutes, refresh
+// right then, before responding. This keeps things fresh no matter
+// how sporadically the app is used, without wasting API quota when
+// nobody's around.
+async function ensureFresh() {
+  const STALE_MS = 15 * 60 * 1000;
+  const isStale = !lastRefreshed || Date.now() - new Date(lastRefreshed).getTime() > STALE_MS;
+  if (!isStale) return;
+  if (!refreshInProgress) {
+    refreshInProgress = refreshFeeds().finally(() => {
+      refreshInProgress = null;
+    });
+  }
+  await refreshInProgress;
+}
 
 async function refreshFeeds() {
   const all = [];
@@ -188,14 +207,14 @@ async function refreshFeeds() {
   console.log(`Refreshed feeds: ${cachedArticles.length} articles at ${lastRefreshed}`);
 }
 
-// Refresh on startup, then every 3 hours.
-// Why 3 hours: NewsAPI's free tier allows 100 requests/day, and each
-// refresh uses 6 (one per category) — 3-hour intervals use ~48/day,
-// leaving safe headroom. RSS feeds have no such limit.
+// Startup refresh, plus a backup timer for while the server stays
+// continuously awake (a real refresh-if-stale check also runs per
+// request, see ensureFresh above).
 refreshFeeds();
 setInterval(refreshFeeds, 3 * 60 * 60 * 1000);
 
-app.get('/api/news', (req, res) => {
+app.get('/api/news', async (req, res) => {
+  await ensureFresh();
   const { category, sport, team } = req.query;
   let result = cachedArticles;
   if (category) result = result.filter((a) => a.category === category);
@@ -204,7 +223,8 @@ app.get('/api/news', (req, res) => {
   res.json({ count: result.length, lastRefreshed, articles: result });
 });
 
-app.get('/', (req, res) => {
+app.get('/', async (req, res) => {
+  await ensureFresh();
   res.json({ status: 'FeedPulse backend running', totalArticles: cachedArticles.length, lastRefreshed });
 });
 
